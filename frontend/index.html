@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RoomSync | Collaborative Editor</title>
+    <style>
+        
+        :root { --bg: #1e1e1e; --sidebar: #252526; --text: #d4d4d4; --accent: #007acc; --danger: #f44336; --success: #4caf50; }
+        body { margin: 0; font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        
+        
+        header { background: var(--sidebar); padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; height: 50px; }
+        .brand { font-weight: bold; font-size: 1.2rem; letter-spacing: 1px; color: var(--accent); display: flex; align-items: center; gap: 10px; }
+        .status-badge { font-size: 0.8rem; background: #333; padding: 2px 8px; border-radius: 4px; color: #888; }
+        
+        
+        #controls { display: flex; gap: 10px; }
+        input { background: #3c3c3c; border: 1px solid #555; color: white; padding: 8px; border-radius: 4px; outline: none; width: 150px; transition: 0.2s; }
+        input:focus { border-color: var(--accent); }
+        .btn { background: var(--accent); color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.9rem; transition: 0.2s; }
+        .btn:hover { background: #0062a3; }
+        .btn-join { background: #444; }
+        .btn-join:hover { background: #555; }
+
+        
+        #room-info { display: none; align-items: center; gap: 15px; }
+        .connection-status { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; transition: background 0.3s; }
+        .dot.connected { background: var(--success); box-shadow: 0 0 8px var(--success); }
+
+       
+        .container { display: flex; flex-grow: 1; position: relative; }
+        #editor { width: 100%; height: 100%; background: var(--bg); color: var(--text); border: none; padding: 20px; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; font-size: 14px; line-height: 1.6; outline: none; resize: none; tab-size: 4; }
+        
+        #suggestion-box { position: absolute; bottom: 30px; right: 30px; background: #2d2d30; border: 1px solid #454545; padding: 12px; border-radius: 6px; color: #9cdcfe; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 10; font-family: monospace; animation: slideUp 0.2s ease-out; max-width: 300px; white-space: pre-wrap; }
+        
+        #toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #333; padding: 10px 20px; border-radius: 20px; font-size: 0.9rem; opacity: 0; transition: opacity 0.5s; pointer-events: none; border: 1px solid #555; z-index: 100; display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+
+        @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="brand">
+            <span>ROOMSYNC</span>
+            <span class="status-badge" id="env-badge">DETECTING...</span>
+        </div>
+        
+        <div id="controls">
+            <button class="btn" onclick="createRoom()">+ New Room</button>
+            <input type="text" id="room-input" placeholder="Enter Room ID">
+            <button class="btn btn-join" onclick="joinRoom()">Join</button>
+        </div>
+
+        <div id="room-info">
+            <span>Room: <strong id="current-room-id" style="color:white; font-family: monospace;"></strong></span>
+            <div class="connection-status">
+                <div class="dot" id="status-dot"></div>
+                <span id="status-text">Disconnected</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <textarea id="editor" placeholder="# Create or Join a room to start pair programming..." disabled spellcheck="false"></textarea>
+        <div id="suggestion-box"></div>
+    </div>
+
+    <div id="toast">Notification</div>
+
+    <script>
+        
+        const isDev = window.location.port === '5173';
+
+        
+        const badge = document.getElementById('env-badge');
+        badge.innerText = isDev ? 'DEV MODE' : 'PROD MODE';
+        badge.style.color = isDev ? '#ff9800' : '#4caf50';
+
+      
+        const API_URL = isDev ? 'http://localhost:8000' : '';
+
+       
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const WS_BASE = isDev 
+            ? 'ws://localhost:8000/ws' 
+            : `${wsProtocol}//${window.location.host}/api/ws`;
+
+        console.log(`[Config] Running in ${isDev ? 'Dev' : 'Prod'} mode.`);
+        console.log(`[Config] API: ${API_URL}, WS: ${WS_BASE}`);
+
+       
+        let ws;
+        let debounceTimer;
+        const editor = document.getElementById('editor');
+        const suggestionBox = document.getElementById('suggestion-box');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+
+        
+
+        async function createRoom() {
+            try {
+                const res = await fetch(`${API_URL}/rooms`, { method: 'POST' });
+                if (!res.ok) throw new Error("Failed to create room");
+                const data = await res.json();
+                enterRoom(data.roomId);
+                showToast("✅ Room Created!");
+            } catch (e) {
+                console.error(e);
+                showToast("❌ Backend Offline or Error");
+            }
+        }
+
+        function joinRoom() {
+            const id = document.getElementById('room-input').value.trim();
+            if (id) enterRoom(id);
+            else showToast("⚠️ Please enter a Room ID");
+        }
+
+        function enterRoom(roomId) {
+            
+            document.getElementById('controls').style.display = 'none';
+            document.getElementById('room-info').style.display = 'flex';
+            document.getElementById('current-room-id').innerText = roomId;
+            
+            
+            editor.disabled = false;
+            editor.value = "# Loading content...";
+            editor.placeholder = "# Start typing Python code...";
+            editor.focus();
+
+            connectWebSocket(roomId);
+        }
+
+        
+
+        function connectWebSocket(roomId) {
+            const url = `${WS_BASE}/${roomId}`;
+            ws = new WebSocket(url);
+            
+            ws.onopen = () => {
+                statusDot.classList.add('connected');
+                statusText.innerText = "Connected";
+                showToast("🟢 Connected to Room");
+                
+                if (editor.value === "# Loading content...") editor.value = "";
+            };
+
+            ws.onclose = () => {
+                statusDot.classList.remove('connected');
+                statusText.innerText = "Reconnecting...";
+                showToast("🔴 Connection Lost");
+                
+                setTimeout(() => {
+                    if (document.getElementById('controls').style.display === 'none') {
+                        connectWebSocket(roomId);
+                    }
+                }, 3000);
+            };
+
+            ws.onmessage = (event) => {
+                const msg = event.data;
+                
+                if (msg.startsWith("SYSTEM:")) {
+                    const cleanMsg = msg.replace("SYSTEM:", "").trim();
+                    showToast("ℹ️ " + cleanMsg);
+                } else {
+                    
+                    const cursor = editor.selectionStart;
+                    editor.value = msg;
+                    editor.setSelectionRange(cursor, cursor);
+                }
+            };
+        }
+
+
+        editor.addEventListener('input', (e) => {
+            const code = e.target.value;
+            
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(code);
+            }
+
+           
+            clearTimeout(debounceTimer);
+            suggestionBox.style.display = 'none';
+
+            debounceTimer = setTimeout(async () => {
+                if (!code.trim()) return;
+
+                try {
+                    const res = await fetch(`${API_URL}/autocomplete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            code: code,
+                            cursorPosition: editor.selectionStart,
+                            language: "python"
+                        })
+                    });
+                    
+                    const data = await res.json();
+                    if (data.suggestion && data.suggestion.trim() !== "") {
+                        suggestionBox.innerText = "🤖 AI Suggestion:\n" + data.suggestion;
+                        suggestionBox.style.display = 'block';
+                    }
+                } catch (err) {
+                    
+                    console.log("AI inactive");
+                }
+            }, 600);
+        });
+
+      
+
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.innerText = message;
+            toast.style.opacity = '1';
+            setTimeout(() => toast.style.opacity = '0', 3000);
+        }
+    </script>
+</body>
+</html>
